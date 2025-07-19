@@ -17,8 +17,8 @@ interface ICEMessage {
 }
 
 @WebSocketGateway({
-  cors: { origin: '*' },     // allow VS Code live‑server origin
-  namespace: '/signal',      // <‑‑ optional namespace
+  cors: { origin: '*' }, // allow VS Code live‑server origin
+  namespace: '/signal', // <‑‑ optional namespace
 })
 export class RoomsGateway {
   @WebSocketServer() server: Server;
@@ -31,12 +31,18 @@ export class RoomsGateway {
   }
 
   @SubscribeMessage('offer')
-  handleOffer(@ConnectedSocket() client: Socket, @MessageBody() msg: SDPMessage) {
+  handleOffer(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() msg: SDPMessage,
+  ) {
     client.to(msg.roomId).emit('offer', msg.description);
   }
 
   @SubscribeMessage('answer')
-  handleAnswer(@ConnectedSocket() client: Socket, @MessageBody() msg: SDPMessage) {
+  handleAnswer(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() msg: SDPMessage,
+  ) {
     client.to(msg.roomId).emit('answer', msg.description);
   }
 

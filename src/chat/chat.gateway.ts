@@ -39,7 +39,10 @@ export class ChatGateway {
 
   // 3) typing indicator (optional)
   @SubscribeMessage('chat:typing')
-  handleTyping(@ConnectedSocket() client: Socket, @MessageBody() roomId: string) {
+  handleTyping(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() roomId: string,
+  ) {
     client.to(roomId).emit('chat:typing', client.id);
   }
 }
