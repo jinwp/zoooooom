@@ -1,0 +1,15 @@
+version: '3.9'
+services:
+  db:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: zoo
+      POSTGRES_PASSWORD: zoo_pw
+      POSTGRES_DB: zoo_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+volumes:
+  dbdata:

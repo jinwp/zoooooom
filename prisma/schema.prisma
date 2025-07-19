@@ -1,0 +1,60 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  name         String
+  emoji        String?
+  avatarUrl    String?
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  rooms    Room[]         @relation("RoomOwner")
+  stickers StickerAsset[]
+  memories RoomMemory[]   @relation("MemoryTaker")
+}
+
+model Room {
+  id               String    @id @default(uuid())
+  isPublic         Boolean   @default(false)
+  meetingCode      String?   @unique
+  joinPasswordHash String? // null when public
+  title            String?
+  isActive         Boolean   @default(true)
+  createdAt        DateTime  @default(now())
+  startedAt        DateTime?
+  endedAt          DateTime?
+  deletedAt        DateTime?
+
+  ownerUserId String
+  owner       User   @relation("RoomOwner", fields: [ownerUserId], references: [id])
+
+  memories RoomMemory[]
+}
+
+model StickerAsset {
+  id          String   @id @default(uuid())
+  owner       User?    @relation(fields: [ownerUserId], references: [id])
+  ownerUserId String?
+  isDefault   Boolean  @default(false)
+  filePath    String
+  createdAt   DateTime @default(now())
+}
+
+model RoomMemory {
+  id            String   @id @default(uuid())
+  room          Room?    @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  roomId        String?
+  takenBy       User     @relation("MemoryTaker", fields: [takenByUserId], references: [id])
+  takenByUserId String
+  filePath      String
+  takenAt       DateTime @default(now())
+}
