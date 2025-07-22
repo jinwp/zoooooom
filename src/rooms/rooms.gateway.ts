@@ -1,3 +1,4 @@
+// rooms.gateway.ts
 import {
   WebSocketGateway,
   WebSocketServer,
@@ -9,13 +10,21 @@ import {
 } from '@nestjs/websockets';
 import { JwtService } from '@nestjs/jwt';
 import { Server, Socket } from 'socket.io';
+import { NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { RoomsService } from './rooms.service';
-import { Room } from '@prisma/client';
 
-interface SDPMessage { roomId: string; description: RTCSessionDescriptionInit; }
-interface ICEMessage { roomId: string; candidate: RTCIceCandidateInit; }
-interface JoinPayload { roomIdOrCode: string; password?: string; }
-interface JwtPayload { id: string; email: string; name: string; iat?: number; exp?: number; }
+interface SDPMessage {
+  roomId: string;
+  description: RTCSessionDescriptionInit;
+}
+interface ICEMessage {
+  roomId: string;
+  candidate: RTCIceCandidateInit;
+}
+interface JoinPayload {
+  roomIdOrCode: string;
+  password?: string;
+}
 
 interface AuthSocket extends Socket {
   user?: { id: string; email: string; name: string };
@@ -26,29 +35,38 @@ interface AuthSocket extends Socket {
   cors: { origin: '*' },
 })
 export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
-  @WebSocketServer() server: Server;
+  @WebSocketServer() private server: Server;
 
   constructor(
     private readonly jwt: JwtService,
     private readonly rooms: RoomsService,
   ) {}
 
-  // ✅ put helper INSIDE class (TS1131 gone)
+  /** Ensure the socket is authenticated and has a user */
   private assertAuthed(socket: AuthSocket): asserts socket is AuthSocket & {
     user: { id: string; email: string; name: string };
   } {
     if (!socket.user) throw new Error('Unauthenticated socket');
   }
 
+  /** On initial connect: verify JWT, attach user, send STUN config */
   async handleConnection(client: AuthSocket) {
     try {
       const token =
         client.handshake.auth?.token ||
-        client.handshake.headers.authorization?.toString()?.split(' ')[1];
+        client.handshake.headers.authorization
+          ?.toString()
+          .split(' ')[1];
       if (!token) throw new Error('No token');
 
-      const payload = this.jwt.verify<JwtPayload>(token);   // ✅ generic -> no {}
-      client.user = { id: payload.id, email: payload.email, name: payload.name };
+      const payload = this.jwt.verify<{ id: string; email: string; name: string }>(
+        token,
+      );
+      client.user = {
+        id: payload.id,
+        email: payload.email,
+        name: payload.name,
+      };
 
       client.emit('rtc_config', {
         iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
@@ -58,49 +76,89 @@ export class RoomsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
-  handleDisconnect(client: AuthSocket) {
-    client.rooms.forEach(roomId =>
-      client.to(roomId).emit('peer:left', { userId: client.user?.id }),
-    );
+  /** On any disconnect: notify peers, and if owner, delete the room */
+  async handleDisconnect(client: AuthSocket) {
+    // For each room the socket was in (socket.io auto-includes client.id)
+    for (const roomId of client.rooms) {
+      if (roomId === client.id) continue;
+      client.to(roomId).emit('peer:left', { userId: client.user?.id });
+
+      // If the leaving user is the room owner, delete the room
+      try {
+        const room = await this.rooms.findById(roomId);
+        if (room.ownerUserId === client.user?.id) {
+          await this.rooms.delete(roomId);
+          this.server.to(roomId).emit('room-deleted');
+          this.server.socketsLeave(roomId);
+        }
+      } catch {
+        /* ignore errors in cleanup */
+      }
+    }
   }
 
+  /** Join a room by ID *or* meetingCode + optional password */
   @SubscribeMessage('join')
-  async join(@ConnectedSocket() client: AuthSocket, @MessageBody() body: JoinPayload) {
-    this.assertAuthed(client);  // ✅ narrows client.user
+  async join(
+    @ConnectedSocket() client: AuthSocket,
+    @MessageBody() body: JoinPayload,
+  ) {
+    this.assertAuthed(client);
 
-    const room = await this.rooms.findByIdentifier(body.roomIdOrCode);
-    if (!room || !room.isActive) return client.emit('join:error', 'NOT_FOUND');
+    try {
+      // This uses your service.join(dto) → { id } :contentReference[oaicite:0]{index=0}
+      const { id: roomId } = await this.rooms.join({
+        meetingCode: body.roomIdOrCode,
+        password: body.password,
+      });
 
-    const ok = await this.rooms.verifyPassword(room, body.password ?? '');
-    if (!ok) return client.emit('join:error', 'WRONG_PASSWORD');
+      // Enforce 2-peer max
+      const occ = this.server.sockets.adapter.rooms.get(roomId)?.size ?? 0;
+      if (occ >= 2) {
+        return client.emit('join:error', 'ROOM_FULL');
+      }
 
-    const occ = this.server.sockets.adapter.rooms.get(room.id)?.size ?? 0;
-    if (occ >= 2) return client.emit('join:error', 'ROOM_FULL');
-
-    client.join(room.id);
-    client.emit('join:success', this.rooms.strip(room)); // ✅
-    client.to(room.id).emit('peer:joined', { userId: client.user.id }); // ✅ after assertAuthed
+      client.join(roomId);
+      client.emit('join:success', { roomId });
+      client.to(roomId).emit('peer:joined', { userId: client.user.id });
+    } catch (err) {
+      if (err instanceof NotFoundException) {
+        client.emit('join:error', 'NOT_FOUND');
+      } else if (err instanceof UnauthorizedException) {
+        client.emit('join:error', 'WRONG_PASSWORD');
+      } else {
+        client.emit('join:error', 'UNKNOWN_ERROR');
+      }
+    }
   }
 
+  /** Explicit leave (peer clicked “leave”) */
   @SubscribeMessage('leave')
-  leave(@ConnectedSocket() client: AuthSocket, @MessageBody() { roomId }: { roomId: string }) {
+  leave(
+    @ConnectedSocket() client: AuthSocket,
+    @MessageBody() { roomId }: { roomId: string },
+  ) {
     this.assertAuthed(client);
     client.leave(roomId);
     client.to(roomId).emit('peer:left', { userId: client.user.id });
   }
 
+  /** WebRTC offer/answer/ice exchange */
   @SubscribeMessage('offer')
-  offer(@ConnectedSocket() c: AuthSocket, @MessageBody() msg: SDPMessage) {
-    c.to(msg.roomId).emit('offer', msg.description);
+  offer(@ConnectedSocket() client: AuthSocket, @MessageBody() msg: SDPMessage) {
+    client.to(msg.roomId).emit('offer', msg.description);
   }
 
   @SubscribeMessage('answer')
-  answer(@ConnectedSocket() c: AuthSocket, @MessageBody() msg: SDPMessage) {
-    c.to(msg.roomId).emit('answer', msg.description);
+  answer(
+    @ConnectedSocket() client: AuthSocket,
+    @MessageBody() msg: SDPMessage,
+  ) {
+    client.to(msg.roomId).emit('answer', msg.description);
   }
 
   @SubscribeMessage('ice')
-  ice(@ConnectedSocket() c: AuthSocket, @MessageBody() msg: ICEMessage) {
-    c.to(msg.roomId).emit('ice', msg.candidate);
+  ice(@ConnectedSocket() client: AuthSocket, @MessageBody() msg: ICEMessage) {
+    client.to(msg.roomId).emit('ice', msg.candidate);
   }
 }

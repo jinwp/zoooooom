@@ -1,68 +1,77 @@
-import { Injectable } from '@nestjs/common';
+// rooms.service.ts
+import { Injectable, BadRequestException, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import * as bcrypt from 'bcryptjs';
-import { randomBytes } from 'crypto';
-
-export interface CreateRoomOptions {
-  title?: string;
-  isPublic: boolean;
-  password?: string; // plain text ↦ will be hashed
-}
-
-// TOP of file
-import { Room } from '@prisma/client';
+import * as bcrypt from 'bcrypt';
+import { CreateRoomDto } from './dto/create-room.dto';
+import { JoinRoomDto } from './dto/join-room.dto';
 
 @Injectable()
 export class RoomsService {
-  private readonly SALT_ROUNDS = 12;
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private prisma: PrismaService) {}
 
-  // ✅ accept null/undefined
-  async verifyPassword(room: Pick<Room, 'joinPasswordHash'>, password: string) {
-    if (!room.joinPasswordHash) return true;
-    return bcrypt.compare(password, room.joinPasswordHash);
+  async create(dto: CreateRoomDto, ownerUserId: string) {
+    // ensure meetingCode unique
+    if (!ownerUserId) throw new BadRequestException('owner missing');
+    const exists = await this.prisma.room.findUnique({ where: { meetingCode: dto.meetingCode } });
+    if (exists) throw new BadRequestException('meetingCode already exists');
+
+    let joinPasswordHash: string | undefined;
+    if (!dto.isPublic && dto.joinPassword) {
+      joinPasswordHash = await bcrypt.hash(dto.joinPassword, 10);
+    }
+
+    try {
+      return await this.prisma.room.create({
+        data: {
+          meetingCode: dto.meetingCode,
+          title: dto.title ?? null,
+          isPublic: dto.isPublic,
+          joinPasswordHash,
+          owner: { connect: { id: ownerUserId } },
+        },
+      });
+    } catch (e: any) {
+      if (e.code === 'P2002') {
+        throw new BadRequestException('meetingCode already exists');
+      }
+      throw e;
+    }
   }
 
-  // ✅ make it PUBLIC and concrete (no generics), allow null
-  public strip(room: Room): Omit<Room, 'joinPasswordHash'> {
-    const { joinPasswordHash, ...safe } = room;
-    return safe;
+  async getByMeetingCode(code: string) {
+    const room = await this.prisma.room.findUnique({ where: { meetingCode: code } });
+    if (!room) throw new NotFoundException('Room not found');
+    // expose minimal info
+    return {
+      id: room.id,
+      isPublic: room.isPublic,
+      title: room.title,
+    };
   }
 
-  async create(ownerId: string, opts: CreateRoomOptions) {
-    const meetingCode = opts.isPublic ? null : randomBytes(4).toString('hex');
-    const room = await this.prisma.room.create({
-      data: {
-        ownerUserId: ownerId,
-        isPublic: opts.isPublic,
-        title: opts.title,
-        meetingCode,
-        joinPasswordHash: opts.isPublic
-          ? null
-          : await bcrypt.hash(opts.password ?? '', this.SALT_ROUNDS),
-      },
-    });
-    return this.strip(room); // ✅
+  async join(dto: JoinRoomDto) {
+    const room = await this.prisma.room.findUnique({ where: { meetingCode: dto.meetingCode } });
+    if (!room) throw new NotFoundException('Room not found');
+
+    if (!room.isPublic) {
+      if (!dto.password) throw new UnauthorizedException('Password required');
+      const ok = await bcrypt.compare(dto.password, room.joinPasswordHash ?? '');
+      if (!ok) throw new UnauthorizedException('Wrong password');
+    }
+    return { id: room.id };
   }
 
-  async listPublic() {
-    const rooms = await this.prisma.room.findMany({
-      where: { isPublic: true, isActive: true },
-      orderBy: { createdAt: 'desc' },
-    });
-    return rooms.map((r) => this.strip(r)); // ✅ no this.strip binding issue
+  async findById(id: string) {
+    const room = await this.prisma.room.findUnique({ where: { id } });
+    if (!room) throw new NotFoundException('Room not found');
+    return room;
   }
 
-  async findByIdentifier(idOrCode: string) {
-    return this.prisma.room.findFirst({
-      where: { OR: [{ id: idOrCode }, { meetingCode: idOrCode }] },
-    });
-  }
+  async delete(id: string) {
+    // Hard delete:
+    return this.prisma.room.delete({ where: { id } });
 
-  async closeRoom(roomId: string) {
-    await this.prisma.room.update({
-      where: { id: roomId },
-      data: { isActive: false, endedAt: new Date() },
-    });
+    // Or soft delete:
+    // return this.prisma.room.update({ where: { id }, data: { deletedAt: new Date() } });
   }
 }

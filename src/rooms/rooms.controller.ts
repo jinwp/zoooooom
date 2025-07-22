@@ -1,37 +1,41 @@
+// rooms.controller.ts
 import {
-  Controller,
-  Post,
-  Get,
-  Body,
-  Param,
-  UseGuards,
-  Request,
+  Controller, Post, Body, UseGuards, Req, Get, Param, Delete, ForbiddenException
 } from '@nestjs/common';
-import { RoomsService } from './rooms.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { RoomsService } from './rooms.service';
+import { CreateRoomDto } from './dto/create-room.dto';
+import { JoinRoomDto } from './dto/join-room.dto';
 
 @Controller('rooms')
 @UseGuards(JwtAuthGuard)
 export class RoomsController {
-  constructor(private readonly rooms: RoomsService) {}
+  constructor(private readonly roomsService: RoomsService) {}
 
   @Post()
-  async create(
-    @Request() req,
-    @Body()
-    body: { isPublic: boolean; title?: string; password?: string },
-  ) {
-    return this.rooms.create(req.user.id, body);
+  async create(@Body() dto: CreateRoomDto, @Req() req) {
+    const userId = req.user?.sub ?? req.user?.id;
+    return this.roomsService.create(dto, userId); // owner id
   }
 
-  @Get('public')
-  listPublic() {
-    return this.rooms.listPublic();
+  // room lookup by meetingCode (public/private info)
+  @Get('by-code/:code')
+  async getByCode(@Param('code') code: string) {
+    return this.roomsService.getByMeetingCode(code);
   }
 
-  @Get(':id')
-  async get(@Param('id') id: string) {
-    const room = await this.rooms.findByIdentifier(id);
-    return room ? this.rooms.strip(room) : null;
+  @Post('join')
+  async join(@Body() dto: JoinRoomDto) {
+    return this.roomsService.join(dto);
+  }
+
+  // owner deletes room explicitly
+  @Delete(':id')
+  async delete(@Param('id') id: string, @Req() req) {
+    const room = await this.roomsService.findById(id);
+    if (room.ownerUserId !== req.user.sub) {
+      throw new ForbiddenException('Not the owner');
+    }
+    return this.roomsService.delete(id);
   }
 }
