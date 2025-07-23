@@ -33,7 +33,8 @@ export class RoomsController {
   @Delete(':id')
   async delete(@Param('id') id: string, @Req() req) {
     const room = await this.roomsService.findById(id);
-    if (room.ownerUserId !== req.user.sub) {
+    const userId = req.user?.sub ?? req.user?.id;
+    if (room.ownerUserId !== userId) {
       throw new ForbiddenException('Not the owner');
     }
     return this.roomsService.delete(id);

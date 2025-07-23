@@ -39,13 +39,17 @@ export class RoomsService {
   }
 
   async getByMeetingCode(code: string) {
-    const room = await this.prisma.room.findUnique({ where: { meetingCode: code } });
+    const room = await this.prisma.room.findUnique({
+      where: { meetingCode: code },
+    });
     if (!room) throw new NotFoundException('Room not found');
     // expose minimal info
     return {
       id: room.id,
+      meetingCode: room.meetingCode,
       isPublic: room.isPublic,
       title: room.title,
+      ownerUserId: room.ownerUserId,
     };
   }
 
@@ -58,7 +62,7 @@ export class RoomsService {
       const ok = await bcrypt.compare(dto.password, room.joinPasswordHash ?? '');
       if (!ok) throw new UnauthorizedException('Wrong password');
     }
-    return { id: room.id };
+    return { id: room.id, ownerUserId: room.ownerUserId };
   }
 
   async findById(id: string) {
